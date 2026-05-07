@@ -11,9 +11,6 @@ ssperf — это высокоэффективный Bash-скрипт для а
 Мультиязычность: Поддержка русского и английского интерфейсов (ключ -Lg).
 Интеграция: Вывод в формате JSON для Zabbix и поддержка Syslog (локально/удаленно).
 
-
-Установка зависимостей
-
 Для работы скрипта требуются: iperf3, sshpass, jq, bc.
 
 # Ubuntu / Debian:
@@ -37,6 +34,7 @@ UDP тест 1 Гбит/с на 8 потоков (EN интерфейс):
 ./ssperf -h 192.168.1.10 -u root -p 'pass' -z
 
 ssperf is a high-efficiency Bash script for automated dual-way bandwidth measurement between local and remote hosts.
+
 Key Features
 Dual-way Test: Automatically performs sequential Upload and Download measurements.
 Smart Auth: Supports SSH passwords (via sshpass) and SSH keys.
@@ -44,8 +42,6 @@ Auto-install: Checks for iperf3 on the remote side and offers automatic installa
 Version Control: Compares iperf3 versions to prevent JSON parsing errors.
 Bilingual: Supports Russian and English interfaces (via -Lg flag).
 Integration: JSON output for Zabbix and Syslog support (local/remote).
-
-Installing Dependencies
 
 Required tools: iperf3, sshpass, jq, bc.
 # Ubuntu / Debian:
