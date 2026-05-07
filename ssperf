@@ -1,0 +1,187 @@
+#!/bin/bash
+
+################################################################################
+# ssperf - Bandwidth Measurement Tool
+# VERSION: 1.9.9 (Stable Release)
+#
+# DEPENDENCIES / ЗАВИСИМОСТИ:
+#   Ubuntu/Debian: sudo apt install iperf3 sshpass jq bc
+#   RHEL/CentOS:   sudo dnf install iperf3 sshpass jq bc
+################################################################################
+
+VERSION="1.9.9"
+
+# --- Defaults / Умолчания ---
+MODE="tcp"; TCP_BW="0"; UDP_BW="100M"; THREADS="1"; DURATION="5"
+SSH_PORT="22"; IPERF_PORT="5201"; ZABBIX_MODE=0; NO_HEADER=0
+SYSLOG_ENABLED=0; SYSLOG_HOST=""; LANG_MODE="ru"
+
+usage() {
+    if [[ "$LANG_MODE" == "en" ]]; then
+        echo "ssperf v$VERSION — Dual-way bandwidth measurement tool"
+        echo ""
+        echo "AUTH PARAMETERS:"
+        echo "  -h <host>      Remote IP or DNS (required)"
+        echo "  -u <user>      SSH username (required)"
+        echo "  -p <pass>      SSH password (use 'single quotes')"
+        echo "  -k <key>       Path to private SSH key"
+        echo "  -S <port>      SSH port (default: 22)"
+        echo ""
+        echo "TEST OPTIONS:"
+        echo "  -m <tcp|udp>   Protocol (default: tcp)"
+        echo "  -P <port>      iperf3 server port (default: 5201)"
+        echo "  -T <sec>       Duration per way (default: 5 sec)"
+        echo "  -n <threads>   Parallel streams (default: 1)"
+        echo "  -b <bandwidth> Bandwidth limit (e.g. -b 1G). Default UDP: 100M"
+        echo ""
+        echo "OUTPUT & LOGGING:"
+        echo "  -L             Log to local syslog"
+        echo "  -L <ip>        Send to remote syslog IP"
+        echo "  -Lg <ru|en>    Change language (default: ru)"
+        echo "  -z             JSON output for Zabbix"
+        echo "  -H             Hide table headers"
+        echo "  -v             Show version and exit"
+    else
+        echo "ssperf v$VERSION — Утилита двустороннего замера скорости"
+        echo ""
+        echo "ПАРАМЕТРЫ АВТОРИЗАЦИИ:"
+        echo "  -h <host>      Удаленный IP или DNS-имя (обязательно)"
+        echo "  -u <user>      SSH логин (обязательно)"
+        echo "  -p <pass>      SSH пароль (в одинарных кавычках)"
+        echo "  -k <key>       Путь к приватному SSH-ключу"
+        echo "  -S <port>      Порт SSH (по умолчанию: 22)"
+        echo ""
+        echo "ОПЦИИ ЗАМЕРА:"
+        echo "  -m <tcp|udp>   Протокол (по умолчанию: tcp)"
+        echo "  -P <port>      Порт iperf3 сервера (по умолчанию: 5201)"
+        echo "  -T <sec>       Длительность теста (по умолчанию: 5 сек)"
+        echo "  -n <threads>   Количество потоков (по умолчанию: 1)"
+        echo "  -b <bandwidth> Полоса (например, -b 1G). Для UDP default: 100M"
+        echo ""
+        echo "ЛОГИРОВАНИЕ И ВЫВОД:"
+        echo "  -L             Запись результата в локальный syslog"
+        echo "  -L <ip>        Запись результата в удаленный syslog по IP"
+        echo "  -Lg <ru|en>    Язык интерфейса/справки (по умолчанию: ru)"
+        echo "  -z             Вывод в формате JSON для Zabbix"
+        echo "  -H             Скрыть заголовки таблицы"
+        echo "  -v             Показать версию и выйти"
+    fi
+    exit 1
+}
+
+# Предварительная проверка языка
+for arg in "$@"; do [[ "$arg" == "en" ]] && LANG_MODE="en"; done
+
+check_dependencies() {
+    for cmd in iperf3 sshpass jq bc; do
+        if ! command -v "$cmd" &>/dev/null; then 
+            [[ "$LANG_MODE" == "en" ]] && echo "error: '$cmd' missing." >&2 || echo "ошибка: '$cmd' не найден." >&2
+            exit 1
+        fi
+    done
+}
+
+[[ "$1" == "-v" ]] && { echo "$VERSION"; exit 0; }
+check_dependencies
+
+while getopts "h:u:p:k:m:n:T:b:S:P:zHL:v" opt; do
+    case $opt in
+        h) HOST="$OPTARG" ;;
+        u) USER="$OPTARG" ;;
+        p) PASS="$OPTARG" ;;
+        k) KEY_PATH="$OPTARG" ;;
+        m) MODE="$OPTARG" ;;
+        n) THREADS="$OPTARG" ;;
+        T) DURATION="$OPTARG" ;;
+        b) USER_BW="$OPTARG" ;;
+        S) SSH_PORT="$OPTARG" ;;
+        P) IPERF_PORT="$OPTARG" ;;
+        z) ZABBIX_MODE=1 ;;
+        H) NO_HEADER=1 ;;
+        L) 
+           if [[ "$OPTARG" == "g" ]]; then
+               eval next_val=\${$OPTIND}
+               [[ "$next_val" == "en" || "$next_val" == "ru" ]] && { LANG_MODE="$next_val"; OPTIND=$((OPTIND + 1)); }
+           else
+               SYSLOG_ENABLED=1
+               eval next_arg=\${$OPTIND}
+               if [[ -n "$next_arg" && "$next_arg" != -* ]]; then SYSLOG_HOST="$next_arg"; OPTIND=$((OPTIND + 1)); fi
+           fi
+           ;;
+        *) usage ;;
+    esac
+done
+
+if [[ -z "$HOST" || -z "$USER" ]]; then usage; fi
+
+# Настройка SSH
+SSH_OPTS="-p $SSH_PORT -o StrictHostKeyChecking=no -o ConnectTimeout=10"
+if [[ -n "$KEY_PATH" ]]; then SSH_CMD="ssh -i \"$KEY_PATH\" $SSH_OPTS"; else export SSHPASS="$PASS"; SSH_CMD="sshpass -e ssh $SSH_OPTS"; fi
+
+# Проверка iperf3 и версий
+LOCAL_VER=$(iperf3 -v | head -n 1 | awk '{print $2}')
+REMOTE_VER=$($SSH_CMD "$USER@$HOST" "iperf3 -v" 2>/dev/null | head -n 1 | awk '{print $2}')
+
+if [[ -z "$REMOTE_VER" ]]; then
+    if [[ "$LANG_MODE" == "en" ]]; then
+        echo "iperf3 not found on $HOST."
+        read -p "Install automatically? (y/n): " confirm
+    else
+        echo "iperf3 не найден на $HOST."
+        read -p "Установить автоматически? (y/n): " confirm
+    fi
+    if [[ $confirm == [yY] ]]; then
+        $SSH_CMD -t "$USER@$HOST" "sudo apt-get update && sudo apt-get install -y iperf3 || sudo dnf install -y iperf3"
+        REMOTE_VER=$($SSH_CMD "$USER@$HOST" "iperf3 -v" 2>/dev/null | head -n 1 | awk '{print $2}')
+    else exit 1; fi
+fi
+
+# 1. Запуск сервера
+$SSH_CMD "$USER@$HOST" "pkill -9 iperf3; sleep 1; iperf3 -s -p $IPERF_PORT -D" &>/dev/null
+sleep 3
+
+# 2. Аргументы
+FINAL_BW="${USER_BW:-$([[ "$MODE" == "udp" ]] && echo "$UDP_BW" || echo "$TCP_BW")}"
+ARGS="-p $IPERF_PORT -t $DURATION -P $THREADS -J"
+[[ "$MODE" == "udp" ]] && ARGS="$ARGS -u -b $FINAL_BW" || { [[ "$FINAL_BW" != "0" ]] && ARGS="$ARGS -b $FINAL_BW"; }
+
+# 3. Замеры
+UP_JSON=$(iperf3 -c "$HOST" $ARGS 2>/dev/null)
+sleep 1
+DOWN_JSON=$(iperf3 -c "$HOST" $ARGS -R 2>/dev/null)
+$SSH_CMD "$USER@$HOST" "pkill -9 iperf3" &>/dev/null
+
+# 4. Парсинг
+parse() { local v=$(echo "$1" | jq "$2" 2>/dev/null | tr -d '"'); [[ "$v" == "null" || -z "$v" ]] && echo "0" || echo "$v"; }
+LOCAL_IP=$(ip route get "$HOST" 2>/dev/null | grep -oP 'src \K\S+' || hostname -I | awk '{print $1}')
+UP_BPS=$(parse "$UP_JSON" '.end.sum_sent.bits_per_second // .end.sum_received.bits_per_second // .end.sum.bits_per_second')
+DOWN_BPS=$(parse "$DOWN_JSON" '.end.sum_received.bits_per_second // .end.sum_sent.bits_per_second // .end.sum.bits_per_second')
+UP_M=$(echo "scale=2; $UP_BPS/1048576" | bc -l); DN_M=$(echo "scale=2; $DOWN_BPS/1048576" | bc -l)
+
+if [[ "$MODE" == "tcp" ]]; then
+    M1=$(parse "$UP_JSON" '.end.streams.sender.mean_rtt // .end.sum_sent.mean_rtt // 0' | awk '{printf "%.2f", $1/1000}')
+    M2=$(parse "$UP_JSON" '.end.sum_sent.retransmits // 0')
+    [[ "$LANG_MODE" == "en" ]] && { L1="RTT(ms)"; L2="RETR"; } || { L1="RTT(мс)"; L2="ПОВТ"; }
+else
+    M1=$(parse "$UP_JSON" '.end.sum.jitter_ms // 0')
+    M2=$(parse "$UP_JSON" '.end.sum.lost_percent // 0')
+    [[ "$LANG_MODE" == "en" ]] && { L1="JIT(ms)"; L2="LOSS(%)"; } || { L1="ДЖИТ(мс)"; L2="ПОТЕР(%)"; }
+fi
+
+# 5. Вывод
+RESULT_LINE=$(printf "%-15s %-15s %-5s %-10.2f %-10.2f %-10.2f %-10.2f" "$LOCAL_IP" "$HOST" "$MODE" "$UP_M" "$DN_M" "${M1:-0}" "${M2:-0}")
+if [[ $SYSLOG_ENABLED -eq 1 ]]; then [[ -n "$SYSLOG_HOST" ]] && echo "$RESULT_LINE" | logger -n "$SYSLOG_HOST" -t ssperf || echo "$RESULT_LINE" | logger -t ssperf; fi
+
+if [[ $ZABBIX_MODE -eq 1 ]]; then
+    printf '{"local":"%s","remote":"%s","mode":"%s","up_mbps":%.2f,"down_mbps":%.2f,"m1":%s,"m2":%s}\n' "$LOCAL_IP" "$HOST" "$MODE" "$UP_M" "$DN_M" "${M1:-0}" "${M2:-0}"
+else
+    if [[ $NO_HEADER -eq 0 ]]; then
+        if [[ "$LANG_MODE" == "en" ]]; then
+            printf "%-15s %-15s %-5s %-10s %-10s %-10s %-10s\n" "LOCAL" "REMOTE" "MODE" "UP(Mb)" "DN(Mb)" "$L1" "$L2"
+        else
+            printf "%-15s %-15s %-5s %-10s %-10s %-10s %-10s\n" "ЛОКАЛ" "УДАЛ" "МОД" "ИСХ(Мб)" "ВХОД(Мб)" "$L1" "$L2"
+        fi
+    fi
+    echo "$RESULT_LINE"
+fi
+unset SSHPASS
